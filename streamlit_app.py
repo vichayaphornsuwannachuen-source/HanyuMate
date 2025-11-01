@@ -140,5 +140,30 @@ def show_results(level: str):
 
     st.info(f"🏆 {t('score')}: {score}/{len(qset)}")
 
-# =============== View Logic ===============
-view
+# ================= Header Controls =================
+# เลือกโหมด (อย่าใช้ตัวแปร 'view' ลอย ๆ)
+mode_value = st.radio(
+    t("mode_label"),
+    ["lesson", "quiz"],
+    index=0 if ss.view == "lesson" else 1,
+    format_func=lambda x: t("lesson_tab") if x == "lesson" else t("quiz_tab")
+)
+ss.view = mode_value  # sync กลับไปที่ session_state
+
+# เลือกระดับ (ใช้ตัวแปรกลางแล้วค่อยอัปเดต ss.level)
+level_value = st.radio(
+    t("level_label"),
+    LEVELS,
+    index=LEVELS.index(ss.level)
+)
+ss.level = level_value
+level = ss.level
+
+# สวิตช์ใช้ AI ทำควิซ
+use_ai_quiz = st.toggle(
+    "Use AI (DeepSeek) to generate quiz",
+    value=False,
+    help="If off, uses built-in logic."
+)
+if use_ai_quiz and not client:
+    st.warning("DeepSeek API key not found (env: DEEPSEEK_API_KEY). Using local quiz logic.")
