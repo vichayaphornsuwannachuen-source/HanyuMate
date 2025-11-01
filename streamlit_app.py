@@ -1,13 +1,14 @@
-import streamlit as st
+# streamlit_app.py
+import os
+import json
 import random
+import requests
+import streamlit as st
 
 # =============== Page Setup ===============
 st.set_page_config(page_title="HanyuMate — HSK Vocabulary Trainer", page_icon="🎓", layout="centered")
 
-# =============== UI Language Toggle ===============
-ui_en = st.toggle("Switch UI to English", value=True)
-
-# =============== Core Prompt Section (NEW) ===============
+# =============== Core Prompt (visible to show instructor) ===============
 PROMPT_EN = """
 Role:
 You are a friendly Chinese language tutor who helps university students learn vocabulary and pronunciation.
@@ -27,30 +28,27 @@ Constraints:
 with st.expander("🧠 Core Prompt (for future LLM connection) — Click to view"):
     st.code(PROMPT_EN, language="text")
 
-# =============== Text Labels ===============
+# =============== UI Labels (English UI for presentation) ===============
 TXT = {
-    "title_en": "HanyuMate — Chinese Vocabulary + Pinyin + Quiz (HSK1–3)",
-    "title_th": "HanyuMate — สอนคำศัพท์จีน + พินอิน + แบบทดสอบ (HSK1–3)",
-    "mode_label_en": "Mode",
-    "lesson_tab_en": "Lesson",
-    "quiz_tab_en": "Quiz",
-    "level_label_en": "Pick HSK level",
-    "learn_header_en": "Learn Vocabulary (Chinese + Pinyin + Meaning)",
-    "vocab_en": "Vocab",
-    "pinyin_en": "Pinyin",
-    "meaning_en": "Meaning",
-    "next_en": "Next",
-    "start_quiz_en": "Start Quiz for this level",
-    "submit_en": "Submit",
-    "explain_en": "Explanation",
-    "your_ans_en": "Your answer",
-    "correct_en": "Correct",
-    "score_en": "Score",
-    "review_en": "Review",
+    "title": "HanyuMate — Chinese Vocabulary + Pinyin + Quiz (HSK1–3)",
+    "mode_label": "Mode",
+    "lesson_tab": "Lesson",
+    "quiz_tab": "Quiz",
+    "level_label": "Pick HSK level",
+    "learn_header": "Learn Vocabulary (Chinese + Pinyin + Meaning)",
+    "vocab": "Vocab",
+    "pinyin": "Pinyin",
+    "meaning": "Meaning",
+    "next": "Next",
+    "start_quiz": "Start Quiz for this level",
+    "submit": "Submit",
+    "explain": "Explanation",
+    "your_ans": "Your answer",
+    "correct": "Correct",
+    "score": "Score",
+    "review": "Review",
 }
-
-def t(key):
-    return TXT[f"{key}_en"]
+def t(k): return TXT[k]
 
 st.title(t("title"))
 
@@ -65,7 +63,7 @@ HSK_VOCAB = {
         {"word": "喜欢", "pinyin": "xǐ huan", "meaning_en": "to like"},
         {"word": "喝", "pinyin": "hē", "meaning_en": "to drink"},
         {"word": "吃", "pinyin": "chī", "meaning_en": "to eat"},
-        {"word": "看", "pinyin": "kàn", "meaning_en": "to watch/read"},
+        {"word": "看", "pinyin": "kàn", "meaning_en": "to watch / read"},
         {"word": "书", "pinyin": "shū", "meaning_en": "book"},
     ],
     "HSK2": [
@@ -83,7 +81,6 @@ HSK_VOCAB = {
         {"word": "电梯", "pinyin": "diàn tī", "meaning_en": "elevator"},
     ]
 }
-
 LEVELS = ["HSK1", "HSK2", "HSK3"]
 N_QUESTIONS = 5
 
@@ -94,24 +91,91 @@ if "lesson_idx" not in ss: ss.lesson_idx = 0
 if "quiz" not in ss: ss.quiz = []
 if "answers" not in ss: ss.answers = {}
 if "submitted" not in ss: ss.submitted = False
+if "use_ai" not in ss: ss.use_ai = False  # Toggle for DeepSeek
 
-# =============== Quiz Generator ===============
-def generate_quiz(level):
+# =============== Optional AI (DeepSeek) ===============
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = "deepseek-chat"  # or "deepseek-reasoner"
+
+def call_deepseek_generate(word: str, pinyin: str, level: str, meanings_pool_en: list):
+    """
+    Ask DeepSeek to build 1 MCQ for the word.
+    returns: {q, opts(list[(letter,text)]), correct(letter), explain}
+    """
+    system = (
+        "You are a Chinese vocabulary tutor for HSK learners. "
+        "Return ONLY a JSON with fields: question, options(A,B,C,D), correct, explain."
+    )
+    user = f"""
+HSK level: {level}
+Word: {word}
+Pinyin: {pinyin}
+Task: Provide the standard CEFR A1–A2 English meaning as the correct option and create 3 realistic distractors.
+Helpful pool of possible meanings: {list(set(meanings_pool_en))[:30]}
+Return STRICT JSON, no extra text.
+"""
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "temperature": 0.4,
+        "response_format": {"type": "json_object"}
+    }
+    url = "https://api.deepseek.com/chat/completions"
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    data = json.loads(content)  # enforce JSON
+    letters = ["A", "B", "C", "D"]
+    opts = [(k, data["options"][k]) for k in letters]
+    return {
+        "q": data["question"],
+        "opts": opts,
+        "correct": data["correct"].strip().upper(),
+        "explain": data.get("explain", f"{word} ({pinyin})")
+    }
+
+# =============== Quiz Generator (AI toggle + fallback) ===============
+def generate_quiz(level: str, use_ai: bool):
     vocab = HSK_VOCAB[level]
     items = random.sample(vocab, N_QUESTIONS)
+
+    # Use DeepSeek if toggled on and key available
+    if use_ai and DEEPSEEK_API_KEY:
+        meanings_pool = [v["meaning_en"] for v in vocab]
+        quiz = []
+        for item in items:
+            try:
+                q = call_deepseek_generate(item["word"], item["pinyin"], level, meanings_pool)
+            except Exception:
+                # Fallback to local logic on any API error
+                correct = item["meaning_en"]
+                distractors = random.sample([v["meaning_en"] for v in vocab if v != item], 3)
+                opts = [correct] + distractors
+                random.shuffle(opts)
+                letters = ["A","B","C","D"]
+                q = {
+                    "q": f"{item['word']} — Meaning",
+                    "opts": list(zip(letters, opts)),
+                    "correct": letters[opts.index(correct)],
+                    "explain": f"{item['word']} ({item['pinyin']}) → {correct}"
+                }
+            quiz.append(q)
+        return quiz
+
+    # Local (non-AI) logic
     quiz = []
-    for i, item in enumerate(items):
+    for item in items:
         correct = item["meaning_en"]
         distractors = random.sample([v["meaning_en"] for v in vocab if v != item], 3)
         opts = [correct] + distractors
         random.shuffle(opts)
         letters = ["A", "B", "C", "D"]
-        correct_letter = letters[opts.index(correct)]
         quiz.append({
             "q": f"{item['word']} — Meaning",
             "opts": list(zip(letters, opts)),
-            "correct": correct_letter,
-            "explain": f"{item['word']} ({item['pinyin']}) → {item['meaning_en']}"
+            "correct": letters[opts.index(correct)],
+            "explain": f"{item['word']} ({item['pinyin']}) → {correct}"
         })
     return quiz
 
@@ -125,37 +189,43 @@ def show_results():
             correct += 1
         else:
             st.error(f"Q{i} ❌ Your answer: {ans or '-'} | Correct: {q['correct']} ({opt_map[q['correct']]})")
-    st.info(f"🏆 Score: {correct}/{len(ss.quiz)}")
+    st.info(f"🏆 {t('score')}: {correct}/{len(ss.quiz)}")
 
-# =============== Interface ===============
-view = st.radio("Mode", ["lesson", "quiz"], format_func=lambda x: "Lesson" if x == "lesson" else "Quiz")
-ss.level = st.radio("Pick HSK level", LEVELS, index=0)
+# =============== Controls ===============
+view = st.radio(t("mode_label"), ["lesson", "quiz"], format_func=lambda x: t("lesson_tab") if x == "lesson" else t("quiz_tab"))
+ss.level = st.radio(t("level_label"), LEVELS, index=0)
+ss.use_ai = st.toggle("Use AI (DeepSeek) to generate quiz", value=ss.use_ai, help="If off, uses built-in logic.")
+if ss.use_ai and not DEEPSEEK_API_KEY:
+    st.warning("DeepSeek API key not found. Set environment variable DEEPSEEK_API_KEY or turn off the AI toggle.")
 
+# =============== Views ===============
 if view == "lesson":
-    st.subheader("Learn Vocabulary (Chinese + Pinyin + Meaning)")
+    st.subheader(t("learn_header"))
     vocab = HSK_VOCAB[ss.level]
     entry = vocab[ss.lesson_idx % len(vocab)]
     st.markdown(f"### {entry['word']}")
-    st.write(f"• Pinyin: {entry['pinyin']}")
-    st.write(f"• Meaning: {entry['meaning_en']}")
-    if st.button("Next"):
+    st.write(f"• {t('pinyin')}: {entry['pinyin']}")
+    st.write(f"• {t('meaning')}: {entry['meaning_en']}")
+    c1, c2 = st.columns(2)
+    if c1.button(t("next"), use_container_width=True):
         ss.lesson_idx += 1
-    if st.button("Start Quiz"):
-        ss.quiz = generate_quiz(ss.level)
+    if c2.button(t("start_quiz"), use_container_width=True):
+        ss.quiz = generate_quiz(ss.level, ss.use_ai)
         ss.submitted = False
         st.rerun()
 
 else:
     if not ss.quiz:
-        st.warning("No quiz yet — start from the Lesson tab first.")
+        st.info("No quiz yet — click Start Quiz from the Lesson tab.")
     else:
         for i, q in enumerate(ss.quiz, start=1):
             st.markdown(f"**Q{i}. {q['q']}**")
-            choices = [f"{k}. {txt}" for k, txt in q["opts"]]
-            picked = st.radio(f"Answer {i}", choices, key=f"q{i}", disabled=ss.submitted)
-            ss.answers[i] = picked.split(".")[0]
+            labels = [f"{k}. {txt}" for k, txt in q["opts"]]
+            picked = st.radio(f"Answer {i}", labels, key=f"q{i}", disabled=ss.submitted)
+            ss.answers[i] = picked.split(".")[0] if picked else None
 
-        if not ss.submitted and st.button("Submit", type="primary"):
+        colA, colB = st.columns([1,1])
+        if not ss.submitted and colA.button(t("submit"), type="primary", use_container_width=True):
             ss.submitted = True
         if ss.submitted:
             st.divider()
