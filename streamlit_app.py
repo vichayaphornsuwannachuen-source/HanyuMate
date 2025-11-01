@@ -1,202 +1,179 @@
 import os
-import json
 import random
+import unicodedata
+import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 from openai import OpenAI
 
-# =============== Page Setup ===============
-st.set_page_config(page_title="HanyuMate — Chinese Vocabulary + Pinyin + Quiz (HSK1–3)", page_icon="🎓", layout="centered")
+# -------------------- SETUP --------------------
+load_dotenv()
 
-# =============== UI Language Toggle ===============
-ui_en = st.toggle("Switch UI to English", value=True)
+def get_client():
+    base_url = os.getenv("LLM_BASE_URL", "").strip() or None
+    api_key = os.getenv("LLM_API_KEY", "")
+    if not api_key:
+        st.error("❌ Missing API key")
+        st.stop()
+    return OpenAI(base_url=base_url, api_key=api_key)
 
-# =============== DeepSeek Setup ===============
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-client = None
-if DEEPSEEK_API_KEY:
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.groq.com/openai/v1")
+# -------------------- LOAD DATA --------------------
+@st.cache_data
+def load_vocab():
+    df = pd.read_csv("data/hsk_sample.csv")
+    df["hsk_level"] = df["hsk_level"].astype(int)
+    for c in ["hanzi","pinyin","thai","english"]:
+        df[c] = df[c].astype(str).str.strip()
+    return df
 
-# =============== Core Prompt (for display only) ===============
-PROMPT_EN = """
-Role: You are a friendly Chinese tutor.
-Instruction:
-When given a Chinese word and pinyin, generate:
-1. Two example sentences (Chinese + Pinyin + English + Thai)
-2. A short tip to remember tone or meaning
-Constraints:
-- Use HSK1–3 vocabulary only
-- Keep sentences simple (CEFR A1–A2)
+# -------------------- PROMPT TEMPLATE --------------------
+PROMPT = """Role: You are a friendly Chinese tutor.
+Instruction: Given a Chinese word and its pinyin, output:
+1. Two short example sentences (Chinese + Pinyin + English + Thai).
+2. One short memory tip about tone/meaning.
+Constraints: Use only HSK1–3 vocabulary. Keep sentences short (CEFR A1–A2).
+Output format:
+Word: ...
+Pinyin: ...
+Meaning: ... (EN + TH)
+Examples:
+1. ...
+2. ...
+Memory Tip: ...
 """
-with st.expander("🧠 Core Prompt (for future LLM connection) — Click to view"):
-    st.code(PROMPT_EN, language="text")
 
-# =============== Text Labels ===============
-TXT = {
-    "title_en": "HanyuMate — Chinese Vocabulary + Pinyin + Quiz (HSK1–3)",
-    "title_th": "HanyuMate — สอนคำศัพท์จีน + พินอิน + แบบทดสอบ (HSK1–3)",
-    "mode_label_en": "Mode", "mode_label_th": "โหมด",
-    "lesson_tab_en": "Lesson", "lesson_tab_th": "โหมดเรียนศัพท์",
-    "quiz_tab_en": "Quiz", "quiz_tab_th": "แบบทดสอบ",
-    "level_label_en": "Pick HSK level", "level_label_th": "เลือกระดับ HSK",
-    "learn_header_en": "Learn Vocabulary (Chinese + Pinyin + Meaning)",
-    "learn_header_th": "เรียนคำศัพท์ (จีน + พินอิน + ความหมาย)",
-    "vocab_en": "Vocab", "vocab_th": "คำศัพท์",
-    "pinyin_en": "Pinyin", "pinyin_th": "พินอิน",
-    "meaning_en": "Meaning", "meaning_th": "ความหมาย",
-    "next_en": "Next", "next_th": "ถัดไป",
-    "start_quiz_en": "Start Quiz for this level", "start_quiz_th": "เริ่มทำแบบทดสอบจากระดับนี้",
-    "submit_en": "Submit", "submit_th": "ส่งคำตอบ",
-    "score_en": "Score", "score_th": "คะแนน",
-    "ai_examples_en": "Generate AI examples for this word", "ai_examples_th": "ให้ AI สร้างประโยคตัวอย่าง/ทิปจำคำนี้",
-    "new_set_en": "🆕 New quiz set", "new_set_th": "🆕 สร้างชุดใหม่",
-    "regen_en": "♻️ Regenerate", "regen_th": "♻️ สุ่มใหม่",
-    "clear_en": "🧹 Clear answers", "clear_th": "🧹 ล้างคำตอบ",
-    "back_lesson_en": "⬅️ Back to Lesson", "back_lesson_th": "⬅️ กลับไปหน้าเรียน",
-}
-def t(key): return TXT[f"{key}_{'en' if ui_en else 'th'}"]
-
-st.title(t("title"))
-
-# =============== Vocabulary Data ===============
-HSK_VOCAB = {
-    "HSK1": [
-        {"word": "我", "pinyin": "wǒ", "meaning_en": "I; me", "meaning_th": "ฉัน/ผม"},
-        {"word": "你", "pinyin": "nǐ", "meaning_en": "you", "meaning_th": "คุณ/เธอ"},
-        {"word": "他", "pinyin": "tā", "meaning_en": "he", "meaning_th": "เขา"},
-        {"word": "她", "pinyin": "tā", "meaning_en": "she", "meaning_th": "เธอ"},
-        {"word": "喜欢", "pinyin": "xǐ huan", "meaning_en": "to like", "meaning_th": "ชอบ"},
-    ],
-    "HSK2": [
-        {"word": "颜色", "pinyin": "yán sè", "meaning_en": "color", "meaning_th": "สี"},
-        {"word": "机场", "pinyin": "jī chǎng", "meaning_en": "airport", "meaning_th": "สนามบิน"},
-        {"word": "旅游", "pinyin": "lǚ yóu", "meaning_en": "to travel", "meaning_th": "ท่องเที่ยว"},
-        {"word": "牛奶", "pinyin": "niú nǎi", "meaning_en": "milk", "meaning_th": "นม"},
-        {"word": "地图", "pinyin": "dì tú", "meaning_en": "map", "meaning_th": "แผนที่"},
-    ],
-    "HSK3": [
-        {"word": "环境", "pinyin": "huán jìng", "meaning_en": "environment", "meaning_th": "สิ่งแวดล้อม"},
-        {"word": "认真", "pinyin": "rèn zhēn", "meaning_en": "serious", "meaning_th": "ตั้งใจ"},
-        {"word": "解决", "pinyin": "jiě jué", "meaning_en": "to solve", "meaning_th": "แก้ปัญหา"},
-        {"word": "文化", "pinyin": "wén huà", "meaning_en": "culture", "meaning_th": "วัฒนธรรม"},
-        {"word": "电梯", "pinyin": "diàn tī", "meaning_en": "elevator", "meaning_th": "ลิฟต์"},
+def llm_generate(client, model, word, pinyin):
+    messages = [
+        {"role": "system", "content": "You are a helpful Chinese tutor."},
+        {"role": "user", "content": f"{PROMPT}\n\nWord: {word}\nPinyin: {pinyin}"}
     ]
-}
-LEVELS = ["HSK1", "HSK2", "HSK3"]
-def mean_key(): return "meaning_en" if ui_en else "meaning_th"
-
-# =============== State ===============
-ss = st.session_state
-if "view" not in ss: ss.view = "lesson"
-if "level" not in ss: ss.level = "HSK1"
-if "lesson_idx" not in ss: ss.lesson_idx = 0
-if "quiz_map" not in ss: ss.quiz_map = {lvl: [] for lvl in LEVELS}
-if "answers_map" not in ss: ss.answers_map = {lvl: {} for lvl in LEVELS}
-if "submitted_map" not in ss: ss.submitted_map = {lvl: False for lvl in LEVELS}
-
-# =============== DeepSeek Function ===============
-def deepseek_chat(messages, temperature=0.4, model="deepseek-chat"):
-    if not client:
-        raise RuntimeError("API key not found")
-    resp = client.chat.completions.create(model=model, messages=messages, temperature=temperature)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=400,
+    )
     return resp.choices[0].message.content
 
-# =============== Build Question ===============
-def build_one_local_q(item, vocab):
-    correct = item[mean_key()]
-    distractors = random.sample([v[mean_key()] for v in vocab if v != item], min(3, len(vocab)-1))
-    opts = [correct] + distractors
-    random.shuffle(opts)
-    letters = ["A", "B", "C", "D"]
-    return {
-        "word": item["word"],
-        "pinyin": item["pinyin"],
-        "q": f"{item['word']} — {TXT['meaning_en'] if ui_en else TXT['meaning_th']}",
-        "opts": list(zip(letters[:len(opts)], opts)),
-        "correct": letters[opts.index(correct)],
-        "explain": f"{item['word']} ({item['pinyin']}) → {correct}"
-    }
+# -------------------- QUIZ FUNCTIONS --------------------
+def normalize(s): return unicodedata.normalize("NFKC", s.strip().lower())
 
-# =============== Show Results (Show Answer Always) ===============
-def show_results(level: str):
-    qset = ss.quiz_map[level]
-    answers = ss.answers_map[level]
-    score = 0
+def init_state():
+    st.session_state.setdefault("page", "Home")
+    st.session_state.setdefault("level", 1)
+    st.session_state.setdefault("quiz_active", False)
+    st.session_state.setdefault("quiz_items", [])
+    st.session_state.setdefault("answers", {})
+    st.session_state.setdefault("quiz_pool", {})
 
-    for i, q in enumerate(qset, start=1):
-        opt_map = {k: v for k, v in q["opts"]}
-        ans = answers.get(i)
-        corr = q["correct"]
-        corr_txt = opt_map.get(corr, "-")
-        title = f"{q['word']} ({q['pinyin']})"
+def get_quiz_pool(df, level):
+    pool = st.session_state["quiz_pool"].get(level, None)
+    ids = df.index[df["hsk_level"] == level].tolist()
+    if not pool or len(pool) < 5:
+        st.session_state["quiz_pool"][level] = ids.copy()
+        pool = ids.copy()
+    return pool
 
-        if ans == corr:
-            st.success(f"Q{i} ✅ {title} | Your answer: {ans}. {opt_map[ans]}")
-            score += 1
-        else:
-            ans_txt = f"{ans}. {opt_map[ans]}" if ans in opt_map else "-"
-            st.error(f"Q{i} ❌ {title} | Your answer: {ans_txt} | Correct: {corr}. {corr_txt}")
+def build_quiz(df, level, size=5):
+    pool = get_quiz_pool(df, level)
+    chosen = random.sample(pool, k=min(size, len(pool)))
+    st.session_state["quiz_pool"][level] = [x for x in pool if x not in chosen]
 
-        st.caption(f"• Explanation: {q['explain']}")
+    items = []
+    for i in chosen:
+        row = df.loc[i]
+        correct = row["hanzi"]
+        wrongs = df[df["hsk_level"] == level].sample(2)["hanzi"].tolist()
+        options = [correct] + wrongs
+        if random.random() < 0.1:
+            options.append("ไม่มีตัวเลือกที่ถูกต้อง / None of the above")
+            correct = None
+        random.shuffle(options)
+        items.append({
+            "q": f"คำไหนตรงกับพินอิน: {row['pinyin']} (HSK{level})",
+            "opts": options,
+            "ans": correct,
+            "ex": f"{row['hanzi']} ({row['pinyin']}) = {row['thai']} / {row['english']}"
+        })
+    return items
 
-    st.info(f"🏆 {t('score')}: {score}/{len(qset)}")
+def grade_quiz(items, answers):
+    score, res = 0, []
+    for i, q in enumerate(items):
+        choose = answers.get(i, None)
+        correct = q["ans"]
+        ok = (choose == correct) if correct else ("none of the above" in normalize(choose or ""))
+        score += ok
+        res.append((q["q"], choose, correct, ok, q["ex"]))
+    return score, res
 
-# =============== View Logic ===============
-view = st.radio(t("mode_label"), ["lesson", "quiz"], format_func=lambda x: t("lesson_tab") if x=="lesson" else t("quiz_tab"))
-ss.view = view
-ss.level = st.radio(t("level_label"), LEVELS, index=LEVELS.index(ss.level))
-level = ss.level
-use_ai_quiz = st.toggle("Use AI (DeepSeek) to generate quiz", value=False)
-if use_ai_quiz and not client:
-    st.warning("DeepSeek API key not found (env: DEEPSEEK_API_KEY). Using local quiz logic.")
+# -------------------- UI --------------------
+def sidebar(df):
+    st.sidebar.title("🔧 Settings")
+    st.session_state["level"] = st.sidebar.selectbox("HSK Level", [1,2,3])
+    if st.sidebar.button("🏠 Home"): st.session_state["page"] = "Home"
+    if st.sidebar.button("📚 Lesson"): st.session_state["page"] = "Lesson"
+    if st.sidebar.button("📝 Quiz"): st.session_state["page"] = "Quiz"
 
-# =============== Lesson Mode ===============
-if ss.view == "lesson":
-    st.subheader(t("learn_header"))
-    vocab = HSK_VOCAB[level]
-    entry = vocab[ss.lesson_idx % len(vocab)]
-    st.markdown(f"### {entry['word']}")
-    st.write(f"• {t('pinyin')}: {entry['pinyin']}")
-    st.write(f"• {t('meaning')}: {entry[mean_key()]}")
+def page_home():
+    st.title("🎓 HanyuMate — HSK1–3")
+    st.write("สอนคำศัพท์จีน + พินอิน + แบบทดสอบไม่ซ้ำ พร้อมระบบตรวจอัตโนมัติ")
 
-    c1, c2 = st.columns([1, 1])
-    if c1.button(t("next"), use_container_width=True):
-        ss.lesson_idx = (ss.lesson_idx + 1) % len(vocab)
-    if c2.button(t("start_quiz"), use_container_width=True):
-        ss.quiz_map[level] = [build_one_local_q(it, vocab) for it in random.sample(vocab, len(vocab))]
-        ss.answers_map[level] = {}
-        ss.submitted_map[level] = False
-        ss.view = "quiz"
-        st.rerun()
+def page_lesson(df):
+    st.header("📚 Lesson Mode")
+    level = st.session_state["level"]
+    row = df[df["hsk_level"] == level].sample(1).iloc[0]
+    st.write(f"**{row['hanzi']}** ({row['pinyin']}) — {row['thai']} / {row['english']}")
 
-# =============== Quiz Mode ===============
-else:
-    qset = ss.quiz_map[level]
-    c0, c1, c2, c3 = st.columns([1.3, 1, 1, 1.3])
-    if c0.button(t("new_set"), use_container_width=True):
-        vocab = HSK_VOCAB[level]
-        ss.quiz_map[level] = [build_one_local_q(it, vocab) for it in random.sample(vocab, len(vocab))]
-        ss.answers_map[level] = {}
-        ss.submitted_map[level] = False
-        st.rerun()
-    if c3.button(t("back_lesson"), use_container_width=True):
-        ss.view = "lesson"
-        st.rerun()
+    if st.button("✨ Generate Example", key="btn_gen"):
+        try:
+            client = get_client()
+            result = llm_generate(client, os.getenv("LLM_MODEL"), row["hanzi"], row["pinyin"])
+            st.success("✅ ตัวอย่างจาก AI")
+            st.write(result)
+        except Exception as e:
+            st.error(e)
 
-    st.divider()
-    if not qset:
-        st.info("No quiz yet — click 'Start Quiz' in Lesson mode first.")
-    else:
-        for i, q in enumerate(qset, start=1):
-            st.markdown(f"**Q{i}. {q['q']}**")
-            labels = [f"{k}. {txt}" for k, txt in q["opts"]]
-            picked = st.radio(f"Answer_{level}_{i}", labels, key=f"{level}_q{i}", disabled=ss.submitted_map[level])
-            if picked:
-                ss.answers_map[level][i] = picked.split(".")[0]
+def page_quiz(df):
+    st.header("📝 Quiz Mode")
+    level = st.session_state["level"]
 
-        if not ss.submitted_map[level] and st.button(t("submit"), type="primary"):
-            ss.submitted_map[level] = True
+    if not st.session_state["quiz_active"]:
+        if st.button("▶ Start Quiz"):
+            st.session_state["quiz_items"] = build_quiz(df, level)
+            st.session_state["answers"] = {}
+            st.session_state["quiz_active"] = True
             st.rerun()
+        return
 
-        if ss.submitted_map[level]:
-            st.divider()
-            show_results(level)
+    for i, q in enumerate(st.session_state["quiz_items"]):
+        st.subheader(f"ข้อ {i+1}")
+        st.write(q["q"])
+        st.session_state["answers"][i] = st.radio(
+            "เลือกคำตอบ", q["opts"], key=f"q_{i}_{level}", index=None
+        )
+
+    if st.button("✅ Submit"):
+        score, res = grade_quiz(st.session_state["quiz_items"], st.session_state["answers"])
+        st.success(f"คะแนน: {score}/{len(res)}")
+        for q, choose, correct, ok, ex in res:
+            st.write(f"**{q}**")
+            st.write(f"- ตอบ: {choose}")
+            st.write(f"- เฉลย: {correct or 'ไม่มีตัวเลือกที่ถูกต้อง'}")
+            st.caption(f"{'✅ ถูกต้อง' if ok else '❌ ผิด'} | {ex}")
+        st.session_state["quiz_active"] = False
+
+# -------------------- MAIN --------------------
+def main():
+    st.set_page_config(page_title="HanyuMate", page_icon="🀄", layout="centered")
+    init_state()
+    df = load_vocab()
+    sidebar(df)
+
+    page = st.session_state["page"]
+    if page == "Home": page_home()
+    elif page == "Lesson": page_lesson(df)
+    elif page == "Quiz": page_quiz(df)
+
+if __name__ == "__main__":
+    main()
